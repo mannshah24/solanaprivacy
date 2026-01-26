@@ -1,16 +1,3 @@
-/**
- * Privacy Payments Example Tests
- * 
- * These examples demonstrate how to test the privacy payment features.
- * To run actual tests, install a test framework like Jest or Vitest.
- * 
- * Example test scenarios:
- * 1. ElGamal encryption/decryption
- * 2. Private key management
- * 3. Range proof generation
- * 4. Payment SDK operations
- */
-
 import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { Confidential } from '../lib/confidential';
 import { SpectrePaymentSDK } from '../lib/payment-sdk';

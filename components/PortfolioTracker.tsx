@@ -123,8 +123,8 @@ export function PortfolioTracker() {
   if (error) {
     return (
       <div className="text-center py-12">
-        <p className="text-red-400 mb-4">{error}</p>
-        <Button onClick={refresh} variant="outline">
+        <p className="text-red-400 mb-4">{error.message}</p>
+        <Button onClick={refreshPositions} variant="outline">
           Try Again
         </Button>
       </div>

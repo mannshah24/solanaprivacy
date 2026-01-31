@@ -217,9 +217,21 @@ pub mod vault {
     pub fn settle_fees(ctx: Context<SettleFees>) -> Result<()> {
         require!(ctx.accounts.position.is_active, VaultError::PositionInactive);
 
-        // Calculate profit
-        let profit = ctx.accounts.position.current_balance
-            .checked_sub(ctx.accounts.position.initial_balance)
+        // Get user's wallet balance for sanity check
+        let user_balance = ctx.accounts.user.lamports();
+
+        // Calculate profit (both values should be in lamports)
+        let current = ctx.accounts.position.current_balance;
+        let initial = ctx.accounts.position.initial_balance;
+        
+        // Sanity check: current_balance shouldn't be astronomically large
+        require!(
+            current < 1_000_000 * 1_000_000_000, // Max 1M SOL in lamports
+            VaultError::MathOverflow
+        );
+        
+        let profit = current
+            .checked_sub(initial)
             .ok_or(VaultError::NoProfitToSettle)?;
 
         require!(profit > 0, VaultError::NoProfitToSettle);
@@ -232,53 +244,56 @@ pub mod vault {
             .ok_or(VaultError::MathOverflow)? as u64;
 
         require!(fee_amount > 0, VaultError::FeeAmountTooSmall);
+        
+        // Cap fee at 10% of initial balance to prevent absurd fees from calculation errors
+        let max_fee = initial / 10; // Max 10% of initial deposit
+        let capped_fee = fee_amount.min(max_fee);
+        
+        // Ensure user has enough balance to pay the fee
+        require!(
+            user_balance >= capped_fee,
+            VaultError::InsufficientBalance
+        );
 
-        // Prepare seeds for transfer
-        let user_key = ctx.accounts.position.user;
-        let strategy_key = ctx.accounts.position.strategy;
-        let bump = ctx.accounts.position.bump;
-        let position_seeds = &[
-            b"position",
-            user_key.as_ref(),
-            strategy_key.as_ref(),
-            &[bump],
-        ];
-
-        // Transfer fee from position to trader
+        // Transfer fee from user to trader (user pays the fee, not from position account)
         transfer(
-            CpiContext::new_with_signer(
+            CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
                 Transfer {
-                    from: ctx.accounts.position.to_account_info(),
+                    from: ctx.accounts.user.to_account_info(),
                     to: ctx.accounts.trader.to_account_info(),
                 },
-                &[position_seeds],
             ),
-            fee_amount,
+            capped_fee,
         )?;
+
+        // Store values before mutable borrow
+        let user_key = ctx.accounts.position.user;
+        let strategy_key = ctx.accounts.position.strategy;
+        let trader_key = ctx.accounts.strategy.trader;
 
         // Update position
         let position = &mut ctx.accounts.position;
         position.current_balance = position.current_balance
-            .checked_sub(fee_amount)
+            .checked_sub(capped_fee)
             .ok_or(VaultError::InsufficientBalance)?;
         position.initial_balance = position.current_balance; // Reset baseline
         position.total_fees_paid = position.total_fees_paid
-            .checked_add(fee_amount)
+            .checked_add(capped_fee)
             .ok_or(VaultError::MathOverflow)?;
         position.last_fee_settlement = Clock::get()?.unix_timestamp;
 
         // Update strategy stats
         let strategy = &mut ctx.accounts.strategy;
         strategy.total_fees_earned = strategy.total_fees_earned
-            .checked_add(fee_amount)
+            .checked_add(capped_fee)
             .ok_or(VaultError::MathOverflow)?;
 
         emit!(FeesSettled {
             user: user_key,
             strategy: strategy_key,
-            trader: strategy.trader,
-            fee_amount,
+            trader: trader_key,
+            fee_amount: capped_fee,
             remaining_balance: position.current_balance,
             timestamp: Clock::get()?.unix_timestamp,
         });
@@ -291,23 +306,20 @@ pub mod vault {
         require!(ctx.accounts.position.is_active, VaultError::PositionInactive);
 
         let withdraw_amount = ctx.accounts.position.current_balance;
+        let position_lamports = ctx.accounts.position.to_account_info().lamports();
         
-        // Prepare seeds for transfer
-        let user_key = ctx.accounts.position.user;
-        let strategy_key = ctx.accounts.position.strategy;
-        let bump = ctx.accounts.position.bump;
-        let position_seeds = &[
-            b"position",
-            user_key.as_ref(),
-            strategy_key.as_ref(),
-            &[bump],
-        ];
-
-        // Transfer user's balance back (not including rent-exempt amount)
-        if withdraw_amount > 0 {
+        // Only withdraw if there are sufficient lamports in the account
+        // The position account needs to maintain rent-exempt balance until it's closed
+        if withdraw_amount > 0 && position_lamports > withdraw_amount {
+            // Transfer user's balance back
             **ctx.accounts.position.to_account_info().try_borrow_mut_lamports()? -= withdraw_amount;
             **ctx.accounts.user.to_account_info().try_borrow_mut_lamports()? += withdraw_amount;
         }
+        
+        // Prepare seeds for transfer (not used anymore but keeping structure)
+        let user_key = ctx.accounts.position.user;
+        let strategy_key = ctx.accounts.position.strategy;
+        let bump = ctx.accounts.position.bump;
 
         // Update strategy subscriber count before closing
         let strategy = &mut ctx.accounts.strategy;
